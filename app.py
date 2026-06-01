@@ -3,8 +3,8 @@ import pandas as pd
 
 st.set_page_config(page_title="Meesho 3-Month Consolidated P&L", layout="wide")
 
-st.title("📊 Meesho 3-Month Consolidated Profit & Loss Dashboard")
-st.write("April, May, June ka data bina kisi duplication ke 100% accurate P&L.")
+st.title("📊 Meesho Strict 3-Month Matching Dashboard")
+st.write("Sirf unhi orders ka analysis jo inhi 3 mahino ke andar order aur settle hue hain.")
 
 st.markdown("---")
 
@@ -33,8 +33,8 @@ st.markdown("---")
 if 'sku_cost_mapping' not in st.session_state:
     st.session_state.sku_cost_mapping = {}
 
-# --- ACCURATE COMBINATION ENGINE WITH DUPLICATE REMOVAL ---
-def load_and_combine_data():
+# --- STRICT CROSS-REFERENCE ENGINE ---
+def load_and_strict_match():
     all_orders = []
     all_payments = []
     all_ads = []
@@ -67,14 +67,25 @@ def load_and_combine_data():
     if not all_orders or not all_payments:
         return None, None, 0.0
 
-    # Combine and Drop Strict Duplicates across months
-    combined_orders = pd.concat(all_orders, ignore_index=True)
-    order_id_col = [c for c in combined_orders.columns if 'order id' in c.lower() or 'sub order' in c.lower()][0]
-    combined_orders.drop_duplicates(subset=[order_id_col], keep='first', inplace=True)
+    # Combine Base Data
+    df_orders_raw = pd.concat(all_orders, ignore_index=True)
+    df_payments_raw = pd.concat(all_payments, ignore_index=True)
 
-    combined_payments = pd.concat(all_payments, ignore_index=True)
-    pay_order_id_col = 'Sub Order No' if 'Sub Order No' in combined_payments.columns else [c for c in combined_payments.columns if 'order id' in c.lower() or 'sub order' in c.lower()][0]
-    combined_payments.drop_duplicates(subset=[pay_order_id_col], keep='first', inplace=True)
+    # Clean IDs
+    order_id_col = [c for c in df_orders_raw.columns if 'order id' in c.lower() or 'sub order' in c.lower()][0]
+    pay_order_id_col = 'Sub Order No' if 'Sub Order No' in df_payments_raw.columns else [c for c in df_payments_raw.columns if 'order id' in c.lower() or 'sub order' in c.lower()][0]
+
+    df_orders_raw['clean_id'] = df_orders_raw[order_id_col].astype(str).str.strip()
+    df_payments_raw['clean_id'] = df_payments_raw[pay_order_id_col].astype(str).str.strip()
+
+    # CRITICAL SECURITY FIX: Filter out previous month leftovers from payment sheet
+    # We only keep rows in payment that exist in these 3 months' Orders CSV
+    valid_order_ids = set(df_orders_raw['clean_id'].dropna().unique())
+    df_payments_clean = df_payments_raw[df_payments_raw['clean_id'].isin(valid_order_ids)].copy()
+
+    # Drop strictly duplicate rows to prevent double counting
+    df_orders_clean = df_orders_raw.drop_duplicates(subset=['clean_id'], keep='first').copy()
+    df_payments_clean.drop_duplicates(subset=['clean_id'], keep='first', inplace=True)
     
     total_ads_spend = 0.0
     if all_ads:
@@ -83,10 +94,10 @@ def load_and_combine_data():
         combined_ads[ads_cost_col] = pd.to_numeric(combined_ads[ads_cost_col], errors='coerce').fillna(0)
         total_ads_spend = abs(combined_ads[ads_cost_col].sum())
 
-    return combined_orders, combined_payments, total_ads_spend
+    return df_orders_clean, df_payments_clean, total_ads_spend
 
 
-df_orders_all, df_pay_all, total_ads = load_and_combine_data()
+df_orders_all, df_pay_all, total_ads = load_and_strict_match()
 
 if df_orders_all is not None and df_pay_all is not None:
     try:
@@ -109,12 +120,6 @@ if df_orders_all is not None and df_pay_all is not None:
         st.markdown("---")
 
         # --- STEP 3: ANALYTICS CORE ENGINE ---
-        order_id_col = [c for c in df_orders_all.columns if 'order id' in c.lower() or 'sub order' in c.lower()][0]
-        
-        # FIX: Using 'nunique' instead of 'count' to prevent row inflation
-        sku_summary = df_orders_all.groupby(sku_col).agg(Total_Orders=(order_id_col, 'nunique')).reset_index()
-        sku_summary.rename(columns={sku_col: 'SKU'}, inplace=True)
-
         pay_sku_col = 'Supplier SKU' if 'Supplier SKU' in df_pay_all.columns else [c for c in df_pay_all.columns if 'sku' in c.lower()][0]
         payout_col = 'Final Settlement Amount' if 'Final Settlement Amount' in df_pay_all.columns else [c for c in df_pay_all.columns if 'settlement' in c.lower() or 'payout' in c.lower()][0]
         return_charge_col = 'Return Shipping Charge (Incl. GST)' if 'Return Shipping Charge (Incl. GST)' in df_pay_all.columns else [c for c in df_pay_all.columns if 'return shipping' in c.lower() or 'penalty' in c.lower()][0]
@@ -125,13 +130,12 @@ if df_orders_all is not None and df_pay_all is not None:
         df_pay_all[order_status_col] = df_pay_all[order_status_col].fillna('').astype(str).str.strip().str.upper()
         df_pay_all[pay_sku_col] = df_pay_all[pay_sku_col].fillna('').astype(str).str.strip().str.upper()
 
-        df_pay_all = df_pay_all[(df_pay_all[pay_sku_col] != '') & (df_pay_all[pay_sku_col] != 'NAN')]
-
-        # Logic base filtering
+        # Advanced Amount-Based Counters
         df_pay_all['Is_Customer_Return'] = df_pay_all[return_charge_col].apply(lambda x: 1 if 145 <= abs(x) <= 175 else 0)
         df_pay_all['Is_RTO'] = df_pay_all.apply(lambda r: 1 if ('RTO' in r[order_status_col] and r['Is_Customer_Return'] == 0) else 0, axis=1)
         df_pay_all['Is_Delivered'] = df_pay_all.apply(lambda r: 1 if (('DELIVERED' in r[order_status_col] or 'SHIPPED' in r[order_status_col]) and r['Is_Customer_Return'] == 0 and r['Is_RTO'] == 0) else 0, axis=1)
 
+        # Aggregate payments dynamically per SKU
         pay_summary = df_pay_all.groupby(pay_sku_col).agg(
             Net_Payout=(payout_col, 'sum'),
             Return_Charges=(return_charge_col, lambda x: abs(sum(x))),
@@ -141,11 +145,15 @@ if df_orders_all is not None and df_pay_all is not None:
         ).reset_index()
         pay_summary.rename(columns={pay_sku_col: 'SKU'}, inplace=True)
 
-        final_report = pd.merge(sku_summary, pay_summary, on='SKU', how='outer').fillna(0)
-        
-        for idx, row in final_report.iterrows():
-            if row['Total_Orders'] == 0:
-                final_report.at[idx, 'Total_Orders'] = row['Delivered_Orders'] + row['Customer_Returns'] + row['RTO_Orders']
+        # Base orders summary from cleaned orders
+        sku_summary = df_orders_all.groupby(sku_col).agg(Total_Orders=('clean_id', 'nunique')).reset_index()
+        sku_summary.rename(columns={sku_col: 'SKU'}, inplace=True)
+
+        # STRICT INNER MERGE: Only show rows where we have explicit activity matching our rule
+        final_report = pd.merge(sku_summary, pay_summary, on='SKU', how='inner').fillna(0)
+
+        # Math Sync Correction
+        final_report['Total_Orders'] = final_report['Delivered_Orders'] + final_report['Customer_Returns'] + final_report['RTO_Orders']
 
         final_report['Unit_Cost'] = final_report['SKU'].map(st.session_state.sku_cost_mapping).fillna(0)
         final_report['Total_Product_Cost'] = final_report['Total_Orders'] * final_report['Unit_Cost']
@@ -159,7 +167,7 @@ if df_orders_all is not None and df_pay_all is not None:
         final_report = final_report[(final_report['SKU'] != 'NAN') & (final_report['SKU'] != '')]
 
         # --- SUMMARY DISPLAY ---
-        st.header("🏁 3-Month Combined Performance Summary (Cleaned)")
+        st.header("🏁 3-Month Strict Performance Summary (Gap-Resolved)")
         
         t_orders = int(final_report['Total_Orders'].sum())
         t_delivered = int(final_report['Delivered_Orders'].sum())
@@ -172,12 +180,12 @@ if df_orders_all is not None and df_pay_all is not None:
         total_pl = total_payout - total_cost - total_ads
         
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Unique Orders", t_orders)
-        c2.metric("Total Delivered", t_delivered)
-        c3.metric("Customer Returns", f"{t_cust_returns} Orders")
-        c4.metric("RTO Orders", f"{t_rto} Orders")
+        c1.metric("Total Matched Orders", t_orders)
+        c2.metric("Delivered & Kept", t_delivered)
+        c3.metric("Customer Returns (In-Period)", f"{t_cust_returns} Orders")
+        c4.metric("RTO Orders (In-Period)", f"{t_rto} Orders")
         
-        st.markdown("### Combined Financial Overview")
+        st.markdown("### Match-Corrected Financial Overview")
         f1, f2, f3, f4 = st.columns(4)
         f1.metric("Total Net Payout", f"₹{total_payout:,.2f}")
         f2.metric("Total Sourcing Cost", f"₹{total_cost:,.2f}")
@@ -186,10 +194,11 @@ if df_orders_all is not None and df_pay_all is not None:
         
         st.write("---")
         if total_pl >= 0:
-            st.success(f"💰 **Consolidated Net Profit: ₹{total_pl:,.2f}**")
+            st.success(f"💰 **Strict Net Profit: ₹{total_pl:,.2f}**")
         else:
-            st.error(f"📉 **Consolidated Net Loss: ₹{total_pl:,.2f}**")
+            st.error(f"📉 **Strict Net Loss: ₹{total_pl:,.2f}**")
 
+        st.subheader("📋 SKU Breakdown (Strict 3-Month Data Window)")
         st.dataframe(
             final_report[[
                 'SKU', 'Total_Orders', 'Delivered_Orders', 'Customer_Returns', 'RTO_Orders', 'Unit_Cost', 'Net_Payout', 'Net_Profit_Loss'
@@ -199,3 +208,5 @@ if df_orders_all is not None and df_pay_all is not None:
 
     except Exception as e:
         st.error(f"Error running multi-month analytics: {e}")
+else:
+    st.info("💡 Data calculations dekhne ke liye orders aur payments files upload karein.")
