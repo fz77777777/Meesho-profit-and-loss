@@ -29,14 +29,10 @@ if orders_file and payments_file:
         df_orders = pd.read_csv(orders_file)
         df_orders.columns = df_orders.columns.str.strip()
         
-        # Load Payments Excel Sheets
-        excel_file = pd.ExcelFile(payments_file)
-        
-        # 1. Parse Order Payments Sheet (Skip row 0 because it's a grouped category row)
+        # Load Payments Excel - Sheet wise (Skip row 0 because it's a grouped category header)
         df_pay = pd.read_excel(payments_file, sheet_name="Order Payments", header=1)
         df_pay.columns = df_pay.columns.str.strip()
         
-        # 2. Parse Ads Cost Sheet
         df_ads = pd.read_excel(payments_file, sheet_name="Ads Cost", header=1)
         df_ads.columns = df_ads.columns.str.strip()
         
@@ -66,33 +62,33 @@ if orders_file and payments_file:
         st.markdown("---")
 
         # --- STEP 3: ANALYTICS ENGINE & CALCULATIONS ---
-        status_col = [c for c in df_orders.columns if 'status' in c.lower() or 'state' in c.lower()][0]
         order_id_col = [c for c in df_orders.columns if 'order id' in c.lower() or 'sub order' in c.lower()][0]
         
-        # Cleaning Order CSV columns data
-        df_orders[status_col] = df_orders[status_col].astype(str).str.strip()
-        
-        # SKU-wise Order Summary from CSV
+        # Total Orders directly from Orders CSV
         sku_summary = df_orders.groupby(sku_col).agg(
-            Total_Orders=(order_id_col, 'count'),
-            Delivered_Orders=(status_col, lambda x: sum(x.str.contains('Delivered|Completed|Shipped|SHIPPED|DELIVERED', case=False, na=False))),
-            Customer_Returns=(status_col, lambda x: sum(x.str.contains('Customer Return|Return|RETURN', case=False, na=False))),
-            RTO_Orders=(status_col, lambda x: sum(x.str.contains('RTO|rto', case=False, na=False)))
+            Total_Orders=(order_id_col, 'count')
         ).reset_index()
         sku_summary.rename(columns={sku_col: 'SKU'}, inplace=True)
 
-        # Process Payout from Excel Sheet 'Order Payments'
+        # Process Payout & Returns from Excel Sheet 'Order Payments'
         pay_sku_col = 'Supplier SKU' if 'Supplier SKU' in df_pay.columns else [c for c in df_pay.columns if 'sku' in c.lower()][0]
         payout_col = 'Final Settlement Amount' if 'Final Settlement Amount' in df_pay.columns else [c for c in df_pay.columns if 'settlement' in c.lower() or 'payout' in c.lower()][0]
         return_charge_col = 'Return Shipping Charge (Incl. GST)' if 'Return Shipping Charge (Incl. GST)' in df_pay.columns else [c for c in df_pay.columns if 'return shipping' in c.lower() or 'penalty' in c.lower()][0]
+        order_status_col = 'Live Order Status' if 'Live Order Status' in df_pay.columns else [c for c in df_pay.columns if 'status' in c.lower()][0]
 
-        # Convert to numeric to avoid calculation data type issues
+        # Standardizing Data Types
         df_pay[payout_col] = pd.to_numeric(df_pay[payout_col], errors='coerce').fillna(0)
         df_pay[return_charge_col] = pd.to_numeric(df_pay[return_charge_col], errors='coerce').fillna(0)
-        
+        df_pay[order_status_col] = df_pay[order_status_col].astype(str).str.strip()
+        df_pay[pay_sku_col] = df_pay[pay_sku_col].astype(str).str.strip()
+
+        # Calculate metrics from Excel dynamically
         pay_summary = df_pay.groupby(pay_sku_col).agg(
             Net_Payout=(payout_col, 'sum'),
-            Return_Charges=(return_charge_col, 'sum')
+            Return_Charges=(return_charge_col, lambda x: abs(sum(x))),
+            Delivered_Orders=(order_status_col, lambda x: sum(x.str.contains('Delivered|Shipped', case=False, na=False))),
+            Customer_Returns=(order_status_col, lambda x: sum(x.str.contains('Return', case=False, na=False))),
+            RTO_Orders=(order_status_col, lambda x: sum(x.str.contains('RTO', case=False, na=False)))
         ).reset_index()
         pay_summary.rename(columns={pay_sku_col: 'SKU'}, inplace=True)
 
@@ -104,6 +100,9 @@ if orders_file and payments_file:
         # Merge Orders CSV Data with Excel Payments Data
         final_report = pd.merge(sku_summary, pay_summary, on='SKU', how='left').fillna(0)
         
+        # In case some SKUs are in payment but not in orders csv or vice-versa, clean total orders count
+        final_report['Total_Orders'] = final_report['Total_Orders'].replace(0, final_report['Delivered_Orders'] + final_report['Customer_Returns'] + final_report['RTO_Orders'])
+
         # Sourcing Cost Mapping
         final_report['Unit_Cost'] = final_report['SKU'].map(st.session_state.sku_cost_mapping).fillna(0)
         final_report['Total_Product_Cost'] = final_report['Total_Orders'] * final_report['Unit_Cost']
@@ -124,27 +123,29 @@ if orders_file and payments_file:
         
         total_payout = final_report['Net_Payout'].sum()
         total_cost = final_report['Total_Product_Cost'].sum()
-        total_return_fees = abs(final_report['Return_Charges'].sum())
+        total_return_fees = final_report['Return_Charges'].sum()
         
         # Adjust overall P&L with Global Ads Cost
         total_pl = total_payout - total_cost - total_ads
         
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Orders Processed", t_orders)
+        m1.metric("Total Orders", t_orders)
         m2.metric("Delivered Orders", t_delivered)
-        m3.metric("Customer Returns + RTO", f"{t_returns} ({ (t_returns/t_orders*100) if t_orders>0 else 0:.1f}%)")
-        m4.metric("Total Ads Spend (Month)", f"₹{total_ads:,.2f}")
+        m3.metric("Customer Returns (150-170 Cut)", f"{t_cust_returns} Orders")
+        m4.metric("RTO Orders Detected", f"{t_rto} Orders")
         
         st.markdown("### Financial Overview")
         f1, f2, f3, f4 = st.columns(4)
         f1.metric("Total Net Payout From Meesho", f"₹{total_payout:,.2f}")
         f2.metric("Product Cost (Sourcing)", f"₹{total_cost:,.2f}")
-        f3.metric("Return Penalties Paid", f"₹{total_return_fees:,.2f}")
+        f3.metric("Total Return Penalty Paid", f"₹{total_return_fees:,.2f}")
+        f4.metric("Total Ads Spend (Month)", f"₹{total_ads:,.2f}")
         
+        st.write("---")
         if total_pl >= 0:
-            f4.metric("Final Net Profit (After Ads)", f"₹{total_pl:,.2f}")
+            st.success(f"💰 **Final Net Profit (After Ads & Costs): ₹{total_pl:,.2f}**")
         else:
-            f4.metric("Final Net Loss (After Ads)", f"₹{total_pl:,.2f}")
+            st.error(f"📉 **Final Net Loss (After Ads & Costs): ₹{total_pl:,.2f}**")
 
         # --- DETAILED SKU WISE TABLE ---
         st.subheader("📋 SKU-Wise Deep Parameters Breakdown")
@@ -153,7 +154,7 @@ if orders_file and payments_file:
         display_df = final_report.copy()
         display_df['Return_Percentage'] = display_df['Return_Percentage'].astype(str) + '%'
         
-        # Render clean table without matplotlib dependencies
+        # Render clean table
         st.dataframe(
             display_df[[
                 'SKU', 'Total_Orders', 'Delivered_Orders', 'Customer_Returns', 'RTO_Orders', 
@@ -174,4 +175,4 @@ if orders_file and payments_file:
     except Exception as e:
         st.error(f"Calculation Error: {e}. Kripya check karein ki aapne sahi reports upload ki hain.")
 else:
-    st.info("💡 Dropdown me SKUs dekhne ke liye pehle upar dono files (CSV aur Excel) upload karein.")
+    st.info("💡 Dropdown me SKUs dekhne ke liye pehle upar dono files (Orders CSV aur Payment Excel) upload karein.")
