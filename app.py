@@ -3,7 +3,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Meesho Perfect P&L Analytics", layout="wide")
 
-st.title("📊 Meesho Ultimate Profit & Loss Dashboard (Amount-Verified)")
+st.title("📊 Meesho Ultimate Profit & Loss Dashboard (Bug-Fixed)")
 st.write("Aapke Orders CSV aur Payment Excel ke accurate data par adharit.")
 
 st.markdown("---")
@@ -70,18 +70,26 @@ if orders_file and payments_file:
         # Convert to numeric safely
         df_pay[payout_col] = pd.to_numeric(df_pay[payout_col], errors='coerce').fillna(0)
         df_pay[return_charge_col] = pd.to_numeric(df_pay[return_charge_col], errors='coerce').fillna(0)
-        df_pay[order_status_col] = df_pay[order_status_col].astype(str).str.strip().str.upper()
-        df_pay[pay_sku_col] = df_pay[pay_sku_col].astype(str).str.strip().str.upper()
+        
+        # CRITICAL FIX: Safe conversion to string to prevent 'float' iterable error
+        df_pay[order_status_col] = df_pay[order_status_col].fillna('').astype(str).str.strip().str.upper()
+        df_pay[pay_sku_col] = df_pay[pay_sku_col].fillna('').astype(str).str.strip().str.upper()
+
+        # Filter out completely blank or header junk rows from payment file
+        df_pay = df_pay[df_pay[pay_sku_col] != '']
+        df_pay = df_pay[df_pay[pay_sku_col] != 'NAN']
 
         # ADVANCED COUNTER LOGIC: Direct based on 150-170 Rs. Charge logic
-        # Customer Return = Any row where absolute return charge is between 150 and 175
+        # Customer Return = Any row where absolute return charge is between 145 and 175
         df_pay['Is_Customer_Return'] = df_pay[return_charge_col].apply(lambda x: 1 if 145 <= abs(x) <= 175 else 0)
+        
         # RTO = Status has RTO, and no customer return charge
         df_pay['Is_RTO'] = df_pay.apply(lambda r: 1 if ('RTO' in r[order_status_col] and r['Is_Customer_Return'] == 0) else 0, axis=1)
-        # Delivered = Status has Delivered/Shipped and not a return
+        
+        # Delivered = Status has Delivered/Shipped and not a return or RTO
         df_pay['Is_Delivered'] = df_pay.apply(lambda r: 1 if (('DELIVERED' in r[order_status_col] or 'SHIPPED' in r[order_status_col]) and r['Is_Customer_Return'] == 0 and r['Is_RTO'] == 0) else 0, axis=1)
 
-        # Grouping dynamically
+        # Grouping dynamically per SKU
         pay_summary = df_pay.groupby(pay_sku_col).agg(
             Net_Payout=(payout_col, 'sum'),
             Return_Charges=(return_charge_col, lambda x: abs(sum(x))),
@@ -114,8 +122,9 @@ if orders_file and payments_file:
         mask = final_report['Total_Orders'] > 0
         final_report.loc[mask, 'Return_Percentage'] = (final_report.loc[mask, 'Total_Return_Qty'] / final_report.loc[mask, 'Total_Orders'] * 100).round(2)
 
-        # Remove extra rows if any empty nan sku leaks
+        # Clean table by dropping any lingering row named 'NAN'
         final_report = final_report[final_report['SKU'] != 'NAN']
+        final_report = final_report[final_report['SKU'] != '']
 
         # --- SUMMARY DISPLAY ---
         st.header("🏁 Monthly Performance Summary")
@@ -164,3 +173,5 @@ if orders_file and payments_file:
 
     except Exception as e:
         st.error(f"Error running data analytics: {e}")
+else:
+    st.info("💡 Dropdown me SKUs dekhne ke liye pehle upar dono files (Orders CSV aur Payment Excel) upload karein.")
