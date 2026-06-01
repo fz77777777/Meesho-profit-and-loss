@@ -29,7 +29,7 @@ if orders_file and payments_file:
         df_orders = pd.read_csv(orders_file)
         df_orders.columns = df_orders.columns.str.strip()
         
-        # Load Payments Excel - Sheet wise (Skip row 0 because it's a grouped category header)
+        # Load Payments Excel Sheets (Skip row 0 because it's a grouped category header)
         df_pay = pd.read_excel(payments_file, sheet_name="Order Payments", header=1)
         df_pay.columns = df_pay.columns.str.strip()
         
@@ -38,6 +38,9 @@ if orders_file and payments_file:
         
         # Automatically detect SKU column from Orders CSV
         sku_col = [c for c in df_orders.columns if 'sku' in c.lower() or 'product' in c.lower()][0]
+        
+        # Clean and standardise SKUs
+        df_orders[sku_col] = df_orders[sku_col].astype(str).str.strip()
         unique_skus = sorted(df_orders[sku_col].dropna().unique().tolist())
         
         st.header("2. SKU Costing Configuration")
@@ -76,13 +79,13 @@ if orders_file and payments_file:
         return_charge_col = 'Return Shipping Charge (Incl. GST)' if 'Return Shipping Charge (Incl. GST)' in df_pay.columns else [c for c in df_pay.columns if 'return shipping' in c.lower() or 'penalty' in c.lower()][0]
         order_status_col = 'Live Order Status' if 'Live Order Status' in df_pay.columns else [c for c in df_pay.columns if 'status' in c.lower()][0]
 
-        # Standardizing Data Types
+        # Standardizing Data Types and removing spaces
         df_pay[payout_col] = pd.to_numeric(df_pay[payout_col], errors='coerce').fillna(0)
         df_pay[return_charge_col] = pd.to_numeric(df_pay[return_charge_col], errors='coerce').fillna(0)
         df_pay[order_status_col] = df_pay[order_status_col].astype(str).str.strip()
         df_pay[pay_sku_col] = df_pay[pay_sku_col].astype(str).str.strip()
 
-        # Calculate metrics from Excel dynamically
+        # Calculate metrics from Excel dynamically per SKU
         pay_summary = df_pay.groupby(pay_sku_col).agg(
             Net_Payout=(payout_col, 'sum'),
             Return_Charges=(return_charge_col, lambda x: abs(sum(x))),
@@ -98,10 +101,12 @@ if orders_file and payments_file:
         total_ads = abs(df_ads[ads_cost_col].sum()) 
 
         # Merge Orders CSV Data with Excel Payments Data
-        final_report = pd.merge(sku_summary, pay_summary, on='SKU', how='left').fillna(0)
+        final_report = pd.merge(sku_summary, pay_summary, on='SKU', how='outer').fillna(0)
         
-        # In case some SKUs are in payment but not in orders csv or vice-versa, clean total orders count
-        final_report['Total_Orders'] = final_report['Total_Orders'].replace(0, final_report['Delivered_Orders'] + final_report['Customer_Returns'] + final_report['RTO_Orders'])
+        # Clean up Total_Orders logic where outer join might cause 0s
+        for idx, row in final_report.iterrows():
+            if row['Total_Orders'] == 0:
+                final_report.at[idx, 'Total_Orders'] = row['Delivered_Orders'] + row['Customer_Returns'] + row['RTO_Orders']
 
         # Sourcing Cost Mapping
         final_report['Unit_Cost'] = final_report['SKU'].map(st.session_state.sku_cost_mapping).fillna(0)
@@ -110,7 +115,11 @@ if orders_file and payments_file:
         # Advanced P&L Math SKU wise
         final_report['Net_Profit_Loss'] = final_report['Net_Payout'] - final_report['Total_Product_Cost']
         final_report['Total_Return_Qty'] = final_report['Customer_Returns'] + final_report['RTO_Orders']
-        final_report['Return_Percentage'] = (final_report['Total_Return_Qty'] / final_report['Total_Orders'] * 100).round(2).fillna(0)
+        
+        # Handle zero division safely
+        final_report['Return_Percentage'] = 0.0
+        mask = final_report['Total_Orders'] > 0
+        final_report.loc[mask, 'Return_Percentage'] = (final_report.loc[mask, 'Total_Return_Qty'] / final_report.loc[mask, 'Total_Orders'] * 100).round(2)
 
         # --- DASHBOARD METRICS ---
         st.header("🏁 Monthly Performance Summary")
