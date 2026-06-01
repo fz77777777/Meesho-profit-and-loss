@@ -1,23 +1,21 @@
 import streamlit as st
 import pandas as pd
-from bs4 import BeautifulSoup
-import io
 
-st.set_page_config(page_title="Meesho Deep P&L Analytics", layout="wide")
+st.set_page_config(page_title="Meesho Advance P&L Analytics", layout="wide")
 
 st.title("📊 Meesho Advance Profit & Loss Dashboard")
-st.write("Aapke Orders (CSV) aur Payments (HTML) data ke base par deep SKU-wise analytics.")
+st.write("Aapke Orders (CSV) aur Official Payment Excel Report ke base par deep SKU-wise analytics.")
 
 st.markdown("---")
 
-# --- STEP 1: FILE UPLOADS FIRST (To extract SKUs automatically) ---
+# --- STEP 1: FILE UPLOADS ---
 st.header("1. Upload Month-wise Reports")
 col1, col2 = st.columns(2)
 
 with col1:
     orders_file = st.file_uploader("Upload Orders Report (CSV)", type=["csv"])
 with col2:
-    payments_file = st.file_uploader("Upload Delivery/Payments Report (HTML)", type=["html"])
+    payments_file = st.file_uploader("Upload Payment Report (Excel - .xlsx)", type=["xlsx"])
 
 st.markdown("---")
 
@@ -28,66 +26,44 @@ if 'sku_cost_mapping' not in st.session_state:
 # --- STEP 2: DYNAMIC SKU DROPDOWN & COSTING ---
 if orders_file and payments_file:
     try:
-        # 1. Read Orders CSV to get unique SKUs
+        # Load Orders CSV
         df_orders = pd.read_csv(orders_file)
         df_orders.columns = df_orders.columns.str.strip()
         
-        # Detect SKU column automatically
-        sku_col = [c for c in df_orders.columns if 'sku' in c.lower() or 'product' in c.lower()][0]
+        # Load Payments Excel sheets
+        excel_file = pd.ExcelFile(payments_file)
+        sheet_names = excel_file.sheet_names
         
-        # Get list of unique SKUs from file
+        # Automatically detect SKU column from Orders CSV
+        sku_col = [c for c in df_orders.columns if 'sku' in c.lower() or 'product' in c.lower()][0]
         unique_skus = sorted(df_orders[sku_col].dropna().unique().tolist())
         
         st.header("2. SKU Costing Configuration")
         st.info(f"💡 Aapki file me kul **{len(unique_skus)} unique SKUs** mile hain. Dropdown se select karke cost set karein.")
         
-        # Dropdown to select SKU
         selected_sku = st.selectbox("🎯 Apna SKU select karein jiski cost enter/change karni hai:", unique_skus)
-        
-        # Get previous cost if already entered, else default to 0.0
         current_cost = st.session_state.sku_cost_mapping.get(selected_sku, 0.0)
         
-        # Input fields for the selected SKU
         col_input1, col_input2 = st.columns([1, 2])
         with col_input1:
             new_cost = st.number_input(f"Cost Price for {selected_sku} (₹):", min_value=0.0, value=float(current_cost), step=1.0)
         
-        # Save button to lock the cost in session memory
         if st.button(f"💾 Save Cost for {selected_sku}"):
             st.session_state.sku_cost_mapping[selected_sku] = new_cost
             st.toast(f"✅ {selected_sku} ki cost ₹{new_cost} save ho gayi!", icon="🚀")
 
-        # Visual indicator showing how many SKUs have costs assigned
-        entered_count = len([k for k, v in st.session_state.sku_cost_mapping.items() if v > 0])
-        st.caption(f"📊 Status: {entered_count} out of {len(unique_skus)} SKUs configured.")
-        
         with st.expander("👁️ Saved Costs Table (Review entered prices)"):
             if st.session_state.sku_cost_mapping:
                 preview_df = pd.DataFrame(list(st.session_state.sku_cost_mapping.items()), columns=['SKU', 'Cost_Price'])
                 st.dataframe(preview_df, hide_index=True)
-            else:
-                st.write("Abhi tak kisi bhi SKU ki cost enter nahi ki gayi hai.")
 
         st.markdown("---")
 
         # --- STEP 3: ANALYTICS ENGINE & CALCULATIONS ---
-        # Read Payments HTML
-        html_content = payments_file.read()
-        soup = BeautifulSoup(html_content, 'html.parser')
-        tables = soup.find_all('table')
-        
-        if not tables:
-            st.error("HTML file me koi data table nahi mila. Kripya sahi file upload karein.")
-            st.stop()
-            
-        # Extracting dataframe from HTML
-        df_pay = pd.read_html(io.StringIO(str(tables[0])))[0]
-        df_pay.columns = df_pay.columns.str.strip()
-
         status_col = [c for c in df_orders.columns if 'status' in c.lower() or 'state' in c.lower()][0]
         order_id_col = [c for c in df_orders.columns if 'order id' in c.lower() or 'sub order' in c.lower()][0]
         
-        # SKU-wise Order Summary
+        # SKU-wise Order Summary from CSV
         sku_summary = df_orders.groupby(sku_col).agg(
             Total_Orders=(order_id_col, 'count'),
             Delivered_Orders=(status_col, lambda x: sum(x.astype(str).str.contains('Delivered|Completed|Shipped', case=False))),
@@ -96,35 +72,64 @@ if orders_file and payments_file:
         ).reset_index()
         sku_summary.rename(columns={sku_col: 'SKU'}, inplace=True)
 
-        # Extract Payments Parameters from HTML
-        pay_sku = [c for c in df_pay.columns if 'sku' in c.lower() or 'product' in c.lower()][0]
-        payout_col = [c for c in df_pay.columns if 'net payout' in c.lower() or 'final' in c.lower() or 'amount' in c.lower()][0]
+        # Initialize Payment Variables
+        total_net_payout = 0.0
+        total_ads_spend = 0.0
+        total_return_charges = 0.0
         
-        ads_col = [c for c in df_pay.columns if 'ads' in c.lower() or 'ad cost' in c.lower()]
-        return_fee_col = [c for c in df_pay.columns if 'return shipping' in c.lower() or 'penalty' in c.lower()]
-        
-        agg_dict = {payout_col: 'sum'}
-        if ads_col: agg_dict[ads_col[0]] = 'sum'
-        if return_fee_col: agg_dict[return_fee_col[0]] = 'sum'
-        
-        pay_summary = df_pay.groupby(pay_sku).agg(agg_dict).reset_index()
-        pay_summary.rename(columns={pay_sku: 'SKU', payout_col: 'Net_Payout'}, inplace=True)
-        
-        if ads_col: pay_summary.rename(columns={ads_col[0]: 'Ads_Spend'}, inplace=True)
-        else: pay_summary['Ads_Spend'] = 0.0
-            
-        if return_fee_col: pay_summary.rename(columns={return_fee_col[0]: 'Return_Charges'}, inplace=True)
-        else: pay_summary['Return_Charges'] = 0.0
+        pay_summary_list = []
 
-        # Merge Data
+        # Process each sheet dynamically inside the Meesho Excel File
+        for sheet in sheet_names:
+            df_sheet = pd.read_excel(payments_file, sheet_name=sheet)
+            df_sheet.columns = df_sheet.columns.str.strip()
+            
+            # Find SKU and Payout/Deduction Columns if present
+            sheet_sku_cols = [c for c in df_sheet.columns if 'sku' in c.lower() or 'product' in c.lower()]
+            
+            if sheet_sku_cols:
+                s_sku = sheet_sku_cols[0]
+                
+                # Look for Payout Amount
+                payout_cols = [c for c in df_sheet.columns if 'net payout' in c.lower() or 'payout amount' in c.lower() or 'final payout' in c.lower() or 'amount' in c.lower()]
+                # Look for Return Penalty/Shipping
+                ret_cols = [c for c in df_sheet.columns if 'return shipping' in c.lower() or 'penalty' in c.lower() or 'deductions' in c.lower()]
+                # Look for Ads cost
+                ad_cols = [c for c in df_sheet.columns if 'ads' in c.lower() or 'ad cost' in c.lower() or 'advertisement' in c.lower()]
+                
+                p_col = payout_cols[0] if payout_cols else None
+                r_col = ret_cols[0] if ret_cols else None
+                a_col = ad_cols[0] if ad_cols else None
+                
+                # Group by SKU for this sheet
+                for name, group in df_sheet.groupby(s_sku):
+                    p_amt = group[p_col].sum() if p_col else 0.0
+                    r_amt = group[r_col].sum() if r_col else 0.0
+                    a_amt = group[a_col].sum() if a_col else 0.0
+                    
+                    pay_summary_list.append({
+                        'SKU': name,
+                        'Net_Payout': p_amt,
+                        'Return_Charges': r_amt,
+                        'Ads_Spend': a_amt
+                    })
+        
+        # Combine all sheet data
+        if pay_summary_list:
+            df_pay_combined = pd.DataFrame(pay_summary_list)
+            pay_summary = df_pay_combined.groupby('SKU').sum().reset_index()
+        else:
+            pay_summary = pd.DataFrame(columns=['SKU', 'Net_Payout', 'Return_Charges', 'Ads_Spend'])
+
+        # Merge Orders CSV Data with Excel Payments Data
         final_report = pd.merge(sku_summary, pay_summary, on='SKU', how='left').fillna(0)
         
-        # Apply the dropdown dictionary costs
+        # Sourcing Cost Mapping
         final_report['Unit_Cost'] = final_report['SKU'].map(st.session_state.sku_cost_mapping).fillna(0)
-        
-        # Calculations
         final_report['Total_Product_Cost'] = final_report['Total_Orders'] * final_report['Unit_Cost']
-        final_report['Net_Profit_Loss'] = final_report['Net_Payout'] - final_report['Total_Product_Cost']
+        
+        # Advanced P&L Math
+        final_report['Net_Profit_Loss'] = final_report['Net_Payout'] - final_report['Total_Product_Cost'] - final_report['Ads_Spend']
         final_report['Total_Return_Qty'] = final_report['Customer_Returns'] + final_report['RTO_Orders']
         final_report['Return_Percentage'] = (final_report['Total_Return_Qty'] / final_report['Total_Orders'] * 100).round(2).fillna(0)
 
@@ -137,23 +142,25 @@ if orders_file and payments_file:
         total_payout = final_report['Net_Payout'].sum()
         total_cost = final_report['Total_Product_Cost'].sum()
         total_ads = final_report['Ads_Spend'].sum()
+        total_return_fees = final_report['Return_Charges'].sum()
         total_pl = final_report['Net_Profit_Loss'].sum()
         
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total Orders Processed", t_orders)
         m2.metric("Delivered Orders", t_delivered)
         m3.metric("Total Returns (Customer + RTO)", f"{t_returns} ({ (t_returns/t_orders*100) if t_orders>0 else 0:.1f}%)")
-        m4.metric("Total Ads Spend Listed", f"₹{total_ads:,.2f}")
+        m4.metric("Total Ads Spend", f"₹{total_ads:,.2f}")
         
         st.markdown("### Financial Overview")
-        f1, f2, f3 = st.columns(3)
-        f1.metric("Total Net Payout Received", f"₹{total_payout:,.2f}")
-        f2.metric("Total Product Cost (Sourcing)", f"₹{total_cost:,.2f}")
+        f1, f2, f3, f4 = st.columns(4)
+        f1.metric("Total Net Payout", f"₹{total_payout:,.2f}")
+        f2.metric("Product Cost (Sourcing)", f"₹{total_cost:,.2f}")
+        f3.metric("Return Penalties/Charges", f"₹{total_return_fees:,.2f}")
         
         if total_pl >= 0:
-            f3.metric("Net Profit/Loss", f"₹{total_pl:,.2f}", delta=f"₹{total_pl:,.2f} Profit", delta_color="normal")
+            f4.metric("Net Profit", f"₹{total_pl:,.2f}", delta=f"₹{total_pl:,.2f} Profit", delta_color="normal")
         else:
-            f3.metric("Net Profit/Loss", f"₹{total_pl:,.2f}", delta=f"₹{total_pl:,.2f} Loss", delta_color="inverse")
+            f4.metric("Net Loss", f"₹{total_pl:,.2f}", delta=f"₹{total_pl:,.2f} Loss", delta_color="inverse")
 
         # --- DETAILED SKU WISE TABLE ---
         st.subheader("📋 SKU-Wise Deep Parameters Breakdown")
@@ -181,4 +188,4 @@ if orders_file and payments_file:
     except Exception as e:
         st.error(f"Calculation Error: {e}. Kripya check karein ki aapne sahi reports upload ki hain.")
 else:
-    st.info("💡 Dropdown me SKUs dekhne ke liye pehle upar dono files (CSV aur HTML) upload karein.")
+    st.info("💡 Dropdown me SKUs dekhne ke liye pehle upar dono files (CSV aur Excel) upload karein.")
